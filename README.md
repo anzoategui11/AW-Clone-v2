@@ -25,11 +25,9 @@ Regenerate sprites after editing `aw_clone/assets/generate.py`:
 .\.venv\Scripts\python.exe -m aw_clone.assets.generate
 ```
 
-Run the tests (no display needed):
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest tests -q
-```
+There is a test suite under `tests/`, but it is parked for now: the tests pass,
+they are simply not being run while the movement rules are still moving around.
+`pytest tests` works whenever they are wanted again.
 
 Headless render for checking the UI without a window:
 
@@ -37,6 +35,17 @@ Headless render for checking the UI without a window:
 .\.venv\Scripts\python.exe main.py --headless --select --center --out plan.png
 .\.venv\Scripts\python.exe main.py --headless --resolve --center --frames 4 --out mid.png
 ```
+
+## AI planning is currently disabled
+
+`AI_PLANNING_ENABLED = False` in `main.py`. Red does not plan orders or move, so
+turns contain only your own units. This is temporary while the movement rules
+are being tuned, since the AI kept arriving at the same chokepoints each turn
+and made it hard to isolate how a single order resolves.
+
+The AI code is untouched and still fully covered by tests; only the call site is
+switched off. Set the flag to `True` to restore simultaneous play — nothing else
+needs changing.
 
 ## Controls
 
@@ -66,6 +75,17 @@ A unit may be ordered to end on a tile unless:
   never sent to the same destination. The lower `unit_id` would win the contest
   at resolution time, so the order is refused at planning time instead.
 - **An enemy unit is standing on it.** Always blocked.
+
+A friendly unit's tile is **transparent**: the unit may walk *through* it but
+may not come to rest on it. Treating those tiles as hard blockers made a single
+friendly unit in front cut off everything behind it. `friendly_blockers()` marks
+them and `search()` reads them as `passable_only` — routed through at the tile's
+normal cost, excluded from the returned range, and rejected as a destination.
+
+Crossing a friendly is not free. It is charged the terrain cost like any other
+tile; the unit standing there makes it impassable, not cheap.
+
+Enemy tiles stay hard blockers, so an enemy does wall off a corridor.
 
 A friendly unit's tile becomes a legal destination once that unit has been
 ordered away, which is what lets one unit trail another:
@@ -124,9 +144,10 @@ of orthogonal steps. Entering a tile costs the step plus the terrain penalty:
 cost = STEP_COST (1) + terrain penalty
 ```
 
-Manhattan distance is therefore the exact cost on featureless ground, and it is
-the A* heuristic. The move-range overlay is a diamond rather than a square for
-the same reason.
+Manhattan distance is therefore the exact cost on featureless ground, which is
+why the move-range overlay is a diamond rather than a square. Pathfinding itself
+is a plain Dijkstra, shared with the overlay so the two can never disagree about
+what a unit can afford.
 
 Road, bridge and HQ have no penalty, so stepping onto one costs exactly 1.
 
@@ -139,9 +160,9 @@ Road, bridge and HQ have no penalty, so stepping onto one costs exactly 1.
 | Mountain | 3 | impassable | 0 |
 | Sea | impassable | impassable | 0 |
 
-Plain is free for infantry, so they cross six tiles on 6 points while a tracked
-unit on the same ground gets four. The per-class table is the main lever for
-separating the two.
+Plain is free for infantry, so they cross five tiles on 5 points while a tracked
+unit on the same ground gets two. Every unit type has 5 move points; the
+per-class terrain table is what separates them.
 
 `IMPASSABLE_PENALTY = 99` marks a penalty as a wall. Infantry cut through forests
 and can climb mountains; tracked vehicles cannot. Aircraft ignore terrain but
@@ -153,7 +174,7 @@ still cost a point per orthogonal step.
 main.py                  entry point and the planning/resolution loop
 aw_clone/
   config.py              tunables: costs, palette, display, tick timing
-  grid.py                Tile, GameMap, terrain costs, Dijkstra, A*
+  grid.py                Tile, GameMap, terrain costs, search, find_path
   units.py               UnitType, Unit, roster, spawn helper
   orders.py              Order / MoveOrder
   turn.py                TurnPlan and resolve_movement
@@ -162,14 +183,10 @@ aw_clone/
   assets/generate.py     procedural sprite generation
   assets/loader.py       sprite cache
   ui/renderer.py         map, overlays, units, side panel
-tests/
-  test_logic.py          terrain, costs, pathfinding, turn plans
-  test_resolution.py     contention, swaps, bottlenecks, invariants
-  test_simulation.py     scenario fairness, AI behaviour, multi-turn runs
 ```
 
-`grid.py`, `units.py`, `orders.py`, `turn.py`, `ai.py`, and `scenario.py` have
-no pygame import, which is why the tests run headless.
+`grid.py`, `units.py`, `orders.py`, `turn.py`, `ai.py`, and `scenario.py` have no
+pygame import, so the rules can be exercised headless.
 
 ## Decisions still open
 

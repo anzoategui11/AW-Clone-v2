@@ -1,4 +1,4 @@
-"""Grid, terrain, and A* pathfinding over move points."""
+"""Grid, terrain, and move-point pathfinding."""
 
 from __future__ import annotations
 
@@ -103,45 +103,90 @@ def is_adjacent(a: tuple[int, int], b: tuple[int, int]) -> bool:
     return (dx, dy) == (1, 0) or (dx, dy) == (0, 1)
 
 
+# Stand-in for "no budget", used when a caller only wants reachability. Far more
+# than any real route could cost.
+NO_BUDGET = 1 << 30
+
+
+def search(
+    game_map: GameMap,
+    start: tuple[int, int],
+    budget: int,
+    movement_class: str,
+    blocked: set[tuple[int, int]] | None = None,
+    passable_only: set[tuple[int, int]] | None = None,
+) -> tuple[dict[tuple[int, int], int], dict[tuple[int, int], tuple[int, int]]]:
+    """Cheapest cost to reach every tile within ``budget``.
+
+    This is the single search behind both the move-range overlay and
+    pathfinding, so the two can never disagree about what a unit can afford.
+    Returns the move points spent reaching each tile and, for each, the tile it
+    was reached from.
+
+    ``blocked`` holds tiles that cannot be entered at all, such as enemy units.
+
+    ``passable_only`` holds tiles that may be crossed but never stopped on, such
+    as a friendly unit standing in the way. They take precedence over
+    ``blocked``, so a friendly unit is transparent rather than acting as a wall,
+    but they still cost whatever the tile costs like any other: crossing one is
+    not a shortcut.
+
+    This is a plain Dijkstra shared by both callers. An A* used to sit in front
+    of this, but on a map this size the search is instant either way and one
+    implementation is easier to keep honest than two.
+    """
+    blocked = blocked or set()
+    passable_only = passable_only or set()
+
+    spent: dict[tuple[int, int], int] = {start: 0}
+    came_from: dict[tuple[int, int], tuple[int, int]] = {}
+    # Heap keyed by negative remaining points, so we expand the richest first.
+    frontier: list[tuple[int, int, int, int]] = [(-budget, start[0], start[1], 0)]
+
+    while frontier:
+        _, cx, cy, cost = heapq.heappop(frontier)
+        if cost > spent.get((cx, cy), NO_BUDGET):
+            continue
+        for dx, dy in DIRECTIONS:
+            nx, ny = cx + dx, cy + dy
+            if not game_map.passable(nx, ny, movement_class):
+                continue
+            # Crossable tiles win over `blocked`: a unit may pass through one
+            # even though it may not stand on it. The start is never blocked.
+            if (nx, ny) in blocked and (nx, ny) not in passable_only and (nx, ny) != start:
+                continue
+            new_cost = cost + game_map.enter_cost(movement_class, (nx, ny))
+            if new_cost > budget:
+                continue
+            if new_cost >= spent.get((nx, ny), NO_BUDGET):
+                continue
+            spent[(nx, ny)] = new_cost
+            came_from[(nx, ny)] = (cx, cy)
+            heapq.heappush(frontier, (-(budget - new_cost), nx, ny, new_cost))
+    return spent, came_from
+
+
 def reachable(
     game_map: GameMap,
     start: tuple[int, int],
     budget: int,
     movement_class: str,
     blocked: set[tuple[int, int]] | None = None,
+    passable_only: set[tuple[int, int]] | None = None,
 ) -> dict[tuple[int, int], int]:
-    """Dijkstra flood-fill of every tile reachable within ``budget``.
+    """Tiles reachable within ``budget``, mapped to move points remaining.
 
-    Returns a mapping of tile -> remaining move points. ``blocked`` holds tiles
-    occupied by other units; they can never be entered.
+    ``passable_only`` tiles are left out of the result: a unit may cross one but
+    may not come to rest on it, so nothing downstream should offer it as a
+    destination.
     """
-    blocked = blocked or set()
-    best: dict[tuple[int, int], int] = {start: budget}
-    # Heap keyed by negative remaining points, so we expand the richest first.
-    frontier: list[tuple[int, int, int, int]] = [(-budget, start[0], start[1], 0)]
-    seen_cost: dict[tuple[int, int], int] = {start: 0}
-
-    while frontier:
-        neg_remaining, cx, cy, spent = heapq.heappop(frontier)
-        if spent > seen_cost.get((cx, cy), 1 << 30):
-            continue
-        remaining = -neg_remaining
-        for dx, dy in DIRECTIONS:
-            nx, ny = cx + dx, cy + dy
-            if not game_map.passable(nx, ny, movement_class):
-                continue
-            if (nx, ny) in blocked and (nx, ny) != start:
-                continue
-            cost = game_map.enter_cost(movement_class, (nx, ny))
-            new_spent = spent + cost
-            if new_spent > budget:
-                continue
-            if new_spent < seen_cost.get((nx, ny), 1 << 30):
-                seen_cost[(nx, ny)] = new_spent
-                new_remaining = budget - new_spent
-                best[(nx, ny)] = new_remaining
-                heapq.heappush(frontier, (-new_remaining, nx, ny, new_spent))
-    return best
+    passable_only = passable_only or set()
+    spent, _ = search(game_map, start, budget, movement_class, blocked, passable_only)
+    return {
+        tile: budget - cost
+        for tile, cost in spent.items()
+        if tile not in passable_only
+    }
 
 
 def find_path(
@@ -151,66 +196,32 @@ def find_path(
     movement_class: str,
     blocked: set[tuple[int, int]] | None = None,
     budget: int | None = None,
+    passable_only: set[tuple[int, int]] | None = None,
 ) -> list[tuple[int, int]] | None:
-    """A* from ``start`` to ``goal``, or ``None`` if unreachable.
+    """Cheapest route from ``start`` to ``goal``, or ``None`` if unreachable.
 
-    Returns the tile list *excluding* the start tile. ``budget`` caps the total
-    move points spent; omit it for a pure reachability query.
+    Returns the tile list *excluding* the start tile. ``budget`` caps the move
+    points spent; omit it for a pure reachability query. The route may pass
+    through ``passable_only`` tiles but may not end on one.
     """
-    blocked = blocked or set()
+    passable_only = passable_only or set()
     if start == goal:
         return []
+    if goal in passable_only or goal in (blocked or set()):
+        return None
 
-    def heuristic(x: int, y: int) -> int:
-        # Manhattan distance, which is the exact number of orthogonal steps
-        # needed to reach a tile on featureless ground. Terrain penalties are
-        # non-negative, so ignoring them keeps this admissible.
-        return abs(x - goal[0]) + abs(y - goal[1])
-
-    frontier: list[tuple[int, int, tuple[int, int]]] = [(heuristic(*start), 0, start)]
-    came_from: dict[tuple[int, int], tuple[int, int]] = {}
-    g_score: dict[tuple[int, int], int] = {start: 0}
-
-    while frontier:
-        _, g, current = heapq.heappop(frontier)
-        if current == goal:
-            path = [current]
-            while path[-1] != start:
-                path.append(came_from[path[-1]])
-            path.reverse()
-            return path[1:]
-        if g > g_score.get(current, 1 << 30):
-            continue
-
-        cx, cy = current
-        for dx, dy in DIRECTIONS:
-            nx, ny = cx + dx, cy + dy
-            if not game_map.passable(nx, ny, movement_class):
-                continue
-            if (nx, ny) in blocked:
-                continue
-            tentative = g + game_map.enter_cost(movement_class, (nx, ny))
-            if budget is not None and tentative > budget:
-                continue
-            if tentative < g_score.get((nx, ny), 1 << 30):
-                g_score[(nx, ny)] = tentative
-                came_from[(nx, ny)] = current
-                heapq.heappush(
-                    frontier, (tentative + heuristic(nx, ny), tentative, (nx, ny))
-                )
-    return None
-
-
-def path_cost(
-    game_map: GameMap,
-    path: list[tuple[int, int]],
-    movement_class: str,
-) -> int:
-    """Total move points spent walking ``path``.
-
-    Every step costs the same, so this is a plain sum over the tiles entered.
-    """
-    total = 0
-    for tile in path:
-        total += game_map.enter_cost(movement_class, tile)
-    return total
+    spent, came_from = search(
+        game_map,
+        start,
+        NO_BUDGET if budget is None else budget,
+        movement_class,
+        blocked,
+        passable_only,
+    )
+    if goal not in spent:
+        return None
+    path = [goal]
+    while path[-1] != start:
+        path.append(came_from[path[-1]])
+    path.reverse()
+    return path[1:]

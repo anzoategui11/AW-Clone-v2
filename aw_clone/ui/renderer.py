@@ -15,7 +15,7 @@ from ..config import (
 )
 from ..grid import GameMap, Terrain
 from ..turn import MoveResolution
-from ..units import Unit
+from ..units import MovementClass, Unit
 
 
 def cell_rect(x: int, y: int, offset_x: int, offset_y: int) -> pygame.Rect:
@@ -232,6 +232,27 @@ def draw_unit(
         pygame.draw.rect(screen, COLORS["order_mark"], mark, 2)
 
 
+def _hover_cost(
+    game_map: GameMap, hover: tuple[int, int], selected: Unit | None
+) -> str:
+    """What the hovered tile charges to enter, formatted for the panel.
+
+    The penalty is per movement class, so this reports the selected unit's class
+    -- the one whose move range is on screen. With nothing selected there is no
+    class to speak for, so all three are listed in boot/tread/air order.
+    """
+    def cost_for(movement_class: str, blocked: str) -> str:
+        if not game_map.passable(hover[0], hover[1], movement_class):
+            return blocked
+        return str(game_map.enter_cost(movement_class, hover))
+
+    if selected is not None:
+        return f"{cost_for(selected.movement_class, 'impassable')} ({selected.movement_class})"
+    # No unit to speak for, so list every class. Impassable is abbreviated to
+    # keep three of them inside the panel.
+    return " ".join(cost_for(c.value, "-") for c in MovementClass)
+
+
 def draw_side_panel(
     screen: pygame.Surface,
     panel_rect: pygame.Rect,
@@ -298,6 +319,7 @@ def draw_side_panel(
         tile = game_map.at(*hover)
         line(f"Hover: {hover[0]},{hover[1]}", small, COLORS["text_dim"])
         line(f"Terrain: {tile.terrain.value}", small, COLORS["text_dim"])
+        line(f"Terrain cost: {_hover_cost(game_map, hover, selected)}", small)
         y += 6
 
     y += 6

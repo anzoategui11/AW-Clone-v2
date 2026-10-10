@@ -18,8 +18,8 @@ NEXT_UNIT_ID = 1
 
 # Movement is orthogonal only, as in Advance Wars 2. A unit steps up, down, left
 # or right; there is no diagonal move, so every route is a sum of orthogonal
-# steps. That also makes Manhattan distance the exact cost on open ground, which
-# is what the A* heuristic uses.
+# steps. That also makes Manhattan distance the exact step count on open ground,
+# which is what the AI scores its approach with.
 STEP_COST = 1
 
 # Terrain penalty added on top of the step cost, per movement class.

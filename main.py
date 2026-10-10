@@ -29,6 +29,15 @@ from aw_clone.ui import renderer as R
 PLAYER_OWNER = 1
 AI_OWNER = 2
 
+# Whether the AI opponent plans orders of its own each turn.
+#
+# Temporarily off while the movement rules are being tuned: the AI's orders were
+# arriving at the same chokepoints every turn and made it hard to isolate how a
+# player order actually resolves. The AI code is untouched and still covered by
+# tests; only the call site is disabled, so flipping this back to True restores
+# simultaneous play with no other change.
+AI_PLANNING_ENABLED = False
+
 
 class Game:
     def __init__(self, headless: bool = False):
@@ -302,10 +311,11 @@ class Game:
         if self.playback_steps:
             return
 
-        # Both sides plan before anything resolves.
-        ai_orders = ai.plan_turn(self.game_map, self.units, AI_OWNER)
+        # Both sides plan before anything resolves. With AI_PLANNING_ENABLED off,
+        # only the player's orders exist, so resolution replays those alone.
         combined = dict(self.plan.orders)
-        combined.update(ai_orders)
+        if AI_PLANNING_ENABLED:
+            combined.update(ai.plan_turn(self.game_map, self.units, AI_OWNER))
 
         resolution = resolve_movement(self.game_map, self.units, combined)
         if not resolution.steps:

@@ -12,7 +12,7 @@ import math
 
 from .grid import GameMap, Terrain, find_path, reachable
 from .orders import MoveOrder, Order
-from .turn import planning_blocked_tiles
+from .turn import friendly_blockers, planning_blocked_tiles
 from .units import Unit
 
 # Reward a unit for finishing on cheap, defensible ground.
@@ -48,9 +48,13 @@ def plan_turn(
         return orders
 
     for unit in sorted(mine, key=lambda u: u.unit_id):
+        # Two sets: squares nothing may end on (enemies, claimed destinations)
+        # and friendly tiles that may be crossed but not stopped on. The search
+        # resolves the overlap itself, so `blocked` is passed as-is.
         blocked = planning_blocked_tiles(units, orders, unit)
+        soft = friendly_blockers(units, orders, unit)
 
-        target = _choose_destination(game_map, unit, enemies, blocked)
+        target = _choose_destination(game_map, unit, enemies, blocked, soft)
         if target is None or target == unit.pos:
             continue
 
@@ -61,6 +65,7 @@ def plan_turn(
             unit.movement_class,
             blocked=blocked,
             budget=unit.unit_type.move_points,
+            passable_only=soft,
         )
         if path:
             orders[unit.unit_id] = Order(unit.unit_id, MoveOrder(path=path))
@@ -73,6 +78,7 @@ def _choose_destination(
     unit: Unit,
     enemies: list[Unit],
     blocked: set[tuple[int, int]],
+    passable_only: set[tuple[int, int]],
 ) -> tuple[int, int] | None:
     """Best tile within budget: closest to the enemy, mild terrain preference."""
     best_score = -math.inf
@@ -80,7 +86,12 @@ def _choose_destination(
 
     budget = unit.unit_type.move_points
     options = reachable(
-        game_map, unit.pos, budget, unit.movement_class, blocked=blocked
+        game_map,
+        unit.pos,
+        budget,
+        unit.movement_class,
+        blocked=blocked,
+        passable_only=passable_only,
     )
     if not options:
         return None

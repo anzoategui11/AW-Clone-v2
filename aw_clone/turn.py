@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .grid import GameMap, find_path, is_adjacent, reachable
-from .orders import Order
+from .orders import MoveOrder, Order
 from .units import Unit
 
 
@@ -67,6 +67,39 @@ def claimed_destinations(orders: dict[int, Order]) -> set[tuple[int, int]]:
     return claimed
 
 
+def friendly_blockers(
+    units: list[Unit],
+    orders: dict[int, Order],
+    unit: Unit,
+) -> set[tuple[int, int]]:
+    """Friendly tiles that may be crossed but never stopped on.
+
+    A friendly unit standing in the way cannot be displaced, but it also must not
+    act as a wall. Treating these as hard blockers made a unit in front cut off
+    everything behind it, which made a friendly formation silently block a
+    whole column.
+
+    Crossing one is not a shortcut, though: the tile costs what it costs like
+    any other. A friendly is transparent, not free. This is what the search
+    reads as ``passable_only``.
+
+    Only tiles held by friendly units that have *no* order appear here. A
+    friendly unit that has been ordered away is expected to be empty by
+    resolution time, so its tile is a normal legal destination.
+    """
+    blockers: set[tuple[int, int]] = set()
+    for other in units:
+        if not other.alive or other.unit_id == unit.unit_id:
+            continue
+        if other.owner != unit.owner:
+            continue
+        order = orders.get(other.unit_id)
+        if order is not None and order.has_any():
+            continue  # ordered away, so expected to be free
+        blockers.add(other.pos)
+    return blockers
+
+
 def planning_blocked_tiles(
     units: list[Unit],
     orders: dict[int, Order],
@@ -91,6 +124,9 @@ def planning_blocked_tiles(
 
     Only a friendly unit's *endpoint* is reserved. The tiles it walks over are
     left fair, so a follower can trail along the same corridor.
+
+    Note this is about *destinations*. Pathing treats a friendly blocker as
+    transparent via :func:`friendly_blockers`, so a unit can route past one.
     """
     occupied = {
         u.pos: u for u in units if u.alive and u.unit_id != unit.unit_id
@@ -101,6 +137,7 @@ def planning_blocked_tiles(
     blocked: set[tuple[int, int]] = set()
     for tile, other in occupied.items():
         if other.owner == unit.owner and tile in vacated:
+            # Ordered away, so the tile is expected to be empty on resolution.
             continue
         blocked.add(tile)
 
@@ -150,21 +187,37 @@ class TurnPlan:
         return claimed_destinations(self.orders)
 
     def blocked_tiles_for(self, unit: Unit) -> set[tuple[int, int]]:
-        """Tiles this unit may not be ordered to enter.
+        """Tiles this unit may not be ordered to end its move on.
 
         Delegates to :func:`planning_blocked_tiles` so the player and the AI
-        share one definition of a legal order.
+        share one definition of a legal order. Friendly tiles are in here too;
+        :meth:`passable_only_for` marks which of those may be crossed anyway.
         """
         return planning_blocked_tiles(self.units, self.orders, unit)
 
+    def passable_only_for(self, unit: Unit) -> set[tuple[int, int]]:
+        """Friendly tiles that can be crossed but not stopped on.
+
+        Kept alongside :meth:`blocked_tiles_for` rather than folded into it:
+        these tiles appear in both, and the search gives them priority. So they
+        are never offered as a destination while still not walling anything off.
+        """
+        return friendly_blockers(self.units, self.orders, unit)
+
     def move_range(self, unit: Unit) -> dict[tuple[int, int], int]:
-        """Tiles the unit can reach this turn, mapped to points remaining."""
+        """Tiles the unit can reach this turn, mapped to points remaining.
+
+        Friendly blockers are passed as ``passable_only`` so the search routes
+        through them at the tile's normal cost, while they stay out of the
+        returned range because a unit may not come to rest on a friendly unit.
+        """
         return reachable(
             self.game_map,
             unit.pos,
             unit.unit_type.move_points,
             unit.movement_class,
             blocked=self.blocked_tiles_for(unit),
+            passable_only=self.passable_only_for(unit),
         )
 
     def preview_path(self, unit: Unit, target: tuple[int, int]) -> list[tuple[int, int]]:
@@ -176,6 +229,7 @@ class TurnPlan:
             unit.movement_class,
             blocked=self.blocked_tiles_for(unit),
             budget=unit.unit_type.move_points,
+            passable_only=self.passable_only_for(unit),
         )
         return path or []
 
@@ -187,10 +241,12 @@ class TurnPlan:
         if target == unit.pos:
             self.orders[unit.unit_id] = Order(unit_id=unit.unit_id)
             return True
+
+        # preview_path already refuses a target sitting on a friendly unit, so
+        # the queued order can never disagree with the path the player was shown.
         path = self.preview_path(unit, target)
         if not path:
             return False
-        from .orders import MoveOrder
 
         self.orders[unit.unit_id] = Order(unit_id=unit.unit_id, move=MoveOrder(path=path))
         return True

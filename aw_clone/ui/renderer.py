@@ -232,25 +232,17 @@ def draw_unit(
         pygame.draw.rect(screen, COLORS["order_mark"], mark, 2)
 
 
-def _hover_cost(
-    game_map: GameMap, hover: tuple[int, int], selected: Unit | None
+def _entry_cost(
+    game_map: GameMap, tile: tuple[int, int], movement_class: str
 ) -> str:
-    """What the hovered tile charges to enter, formatted for the panel.
+    """Move points ``tile`` charges ``movement_class``, or ``impassable``.
 
-    The penalty is per movement class, so this reports the selected unit's class
-    -- the one whose move range is on screen. With nothing selected there is no
-    class to speak for, so all three are listed in boot/tread/air order.
+    Goes through the same ``passable``/``enter_cost`` pair the pathfinder uses,
+    so the panel can never quote a cost the search would not charge.
     """
-    def cost_for(movement_class: str, blocked: str) -> str:
-        if not game_map.passable(hover[0], hover[1], movement_class):
-            return blocked
-        return str(game_map.enter_cost(movement_class, hover))
-
-    if selected is not None:
-        return f"{cost_for(selected.movement_class, 'impassable')} ({selected.movement_class})"
-    # No unit to speak for, so list every class. Impassable is abbreviated to
-    # keep three of them inside the panel.
-    return " ".join(cost_for(c.value, "-") for c in MovementClass)
+    if not game_map.passable(tile[0], tile[1], movement_class):
+        return "impassable"
+    return str(game_map.enter_cost(movement_class, tile))
 
 
 def draw_side_panel(
@@ -319,7 +311,17 @@ def draw_side_panel(
         tile = game_map.at(*hover)
         line(f"Hover: {hover[0]},{hover[1]}", small, COLORS["text_dim"])
         line(f"Terrain: {tile.terrain.value}", small, COLORS["text_dim"])
-        line(f"Terrain cost: {_hover_cost(game_map, hover, selected)}", small)
+        y += 2
+        # One row per movement class, driven by the enum. Adding a class to
+        # MovementClass adds a row here with nothing else to update.
+        line("Terrain cost:", small, COLORS["text_dim"])
+        for movement_class in MovementClass:
+            line(
+                f"{_entry_cost(game_map, hover, movement_class.value)}"
+                f" [{movement_class.name.capitalize()}]",
+                small,
+                COLORS["text_dim"],
+            )
         y += 6
 
     y += 6

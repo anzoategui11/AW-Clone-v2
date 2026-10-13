@@ -25,9 +25,9 @@ Regenerate sprites after editing `aw_clone/assets/generate.py`:
 .\.venv\Scripts\python.exe -m aw_clone.assets.generate
 ```
 
-There is a test suite under `tests/`, but it is parked for now: the tests pass,
-they are simply not being run while the movement rules are still moving around.
-`pytest tests` works whenever they are wanted again.
+There is no test suite at the moment. The rules below were checked by running
+the scenario directly, so they are documented here rather than pinned by
+assertions.
 
 Headless render for checking the UI without a window:
 
@@ -51,15 +51,18 @@ needs changing.
 
 | Input | Action |
 | --- | --- |
+| `W` `A` `S` `D` | Move the cursor one tile (hold to repeat) |
+| `Space` | Act at the cursor: select the unit there, deselect it, send the selected unit there, or cancel that unit's order if it is already selected |
+| Arrow keys | Pan the camera |
 | Drag a unit to a tile | Queue a move |
 | Click a unit, then click a tile | Queue a move (same thing, two clicks) |
-| Click a selected unit again | Deselect it |
+| Click a selected unit again | Deselect it, or cancel its order if it has one |
+| Click a unit that has an order | Select it, leaving the order in place |
 | Click an enemy | Nothing; orders cannot target enemies yet |
-| Right click | Cancel the order on the unit under the cursor |
+| Right click | Cancel the order on the unit under the mouse |
 | Tab | Next unit without an order |
 | Enter | End turn and resolve |
 | R | Clear all orders |
-| Arrows / WASD | Pan the camera |
 
 ## Ordering rules
 

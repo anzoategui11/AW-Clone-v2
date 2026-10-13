@@ -13,6 +13,11 @@ FPS = 60
 MOVE_TICK_MS = 130  # one tile step
 FRAME_MS = 16  # animation frame cap
 
+# Keyboard cursor (WASD). The keydown steps once straight away; holding a
+# direction repeats once the delay has passed, then at the repeat rate.
+CURSOR_INITIAL_DELAY_MS = 280
+CURSOR_REPEAT_MS = 65
+
 # ------------------------------------------------------------- turn / sim ----
 NEXT_UNIT_ID = 1
 

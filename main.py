@@ -15,7 +15,14 @@ import pygame
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from aw_clone import ai
-from aw_clone.config import CELL, FPS, MOVE_TICK_MS, SIDE_PANEL_W
+from aw_clone.config import (
+    CELL,
+    CURSOR_INITIAL_DELAY_MS,
+    CURSOR_REPEAT_MS,
+    FPS,
+    MOVE_TICK_MS,
+    SIDE_PANEL_W,
+)
 
 # Re-exported on the Game instance for convenience and so tests can reach the
 # constants through a running game object.
@@ -31,12 +38,19 @@ AI_OWNER = 2
 
 # Whether the AI opponent plans orders of its own each turn.
 #
-# Temporarily off while the movement rules are being tuned: the AI's orders were
-# arriving at the same chokepoints every turn and made it hard to isolate how a
-# player order actually resolves. The AI code is untouched and still covered by
+# Temporarily off while the movement rules are being tuned.
+# The AI code is untouched and still covered by
 # tests; only the call site is disabled, so flipping this back to True restores
 # simultaneous play with no other change.
 AI_PLANNING_ENABLED = False
+
+# WASD drives the keyboard cursor; the arrows are left for panning the view.
+CURSOR_KEYS: dict[int, tuple[int, int]] = {
+    pygame.K_w: (0, -1),
+    pygame.K_a: (-1, 0),
+    pygame.K_s: (0, 1),
+    pygame.K_d: (1, 0),
+}
 
 
 class Game:
@@ -73,6 +87,12 @@ class Game:
         self.plan = TurnPlan(self.game_map, self.units, active_owner=PLAYER_OWNER)
         self.selected: Unit | None = None
         self.hover: tuple[int, int] | None = None
+        # Keyboard cursor: a tile pointer driven by WASD, used to select units
+        # and place orders without a mouse. Starts on the first unit so it is
+        # never parked on empty ground at the start of a game.
+        self.cursor: tuple[int, int] = self._starting_cursor()
+        self.cursor_timer = 0
+        self.cursor_key: int | None = None
         self.message = ""
         self.message_timer = 0
         self.turn_number = 1
@@ -102,6 +122,117 @@ class Game:
                 return u
         return None
 
+    def _starting_cursor(self) -> tuple[int, int]:
+        """Where the cursor sits on a new turn: the first unit awaiting orders.
+
+        Falls back to the map's centre if every unit already has an order, so
+        the cursor is never left pointing at nothing in particular.
+        """
+        pending = [u for u in self.plan.controllable if not self.plan.order_for(u.unit_id)]
+        if pending:
+            return pending[0].pos
+        return (self.game_map.width // 2, self.game_map.height // 2)
+
+    # ------------------------------------------------------------ cursor ----
+    #
+    # The cursor is a tile pointer, not a screen pointer. It exists so unit
+    # selection and ordering do not need a mouse, which is the whole reason it
+    # is separate from ``hover``.
+    #
+    #   WASD   step one tile, then repeat while held
+    #   Space  act on the tile it points at: select a unit standing there, or
+    #          send the selected unit there if the tile is empty
+    #
+    # The arrows keep their old job of panning the camera. The map is larger
+    # than the window, so the cursor and the camera move independently.
+
+    def move_cursor(self, direction: tuple[int, int]) -> None:
+        """Step the cursor on keydown and restart the hold-to-repeat delay.
+
+        The step is immediate rather than waiting out the delay: a single tap
+        should move exactly one tile, and holding is what earns the repeat.
+        """
+        self.step_cursor(direction)
+        self.cursor_key = None
+        self.cursor_timer = 0
+
+    def step_cursor(self, direction: tuple[int, int]) -> bool:
+        """Move the cursor one tile. Returns False at the map edge.
+
+        Clamped rather than refused, so holding a key against a wall is a no-op
+        instead of stalling the repeat timer.
+        """
+        dx, dy = direction
+        x = min(max(self.cursor[0] + dx, 0), self.game_map.width - 1)
+        y = min(max(self.cursor[1] + dy, 0), self.game_map.height - 1)
+        if (x, y) == self.cursor:
+            return False
+        self.cursor = (x, y)
+        return True
+
+    def toggle_order_or_selection(self, unit: Unit) -> None:
+        """Select, or cancel the order of an already-selected unit.
+
+        Selection takes priority over cancelling. Landing the cursor on a unit
+        that already has an order selects it and leaves the order alone, so the
+        next press can undo it. That gives a four-press loop:
+
+            Space  select        Space  select
+            D  →   order         D  →   order
+            A  ←   select        A  ←   select
+            Space  cancel        Space  deselect
+
+        Cancelling keeps the unit selected, so a replacement order is one move
+        and one press away.
+        """
+        if self.selected is not unit:
+            self.select(unit)
+            return
+        order = self.plan.order_for(unit.unit_id)
+        if order is not None and order.has_any():
+            self.plan.clear(unit.unit_id)
+            self.notify("Order cancelled")
+        else:
+            self.select(None)
+
+    def act_at_cursor(self) -> None:
+        """Select, order, or cancel at the cursor.
+
+        On one of your units: cancel its order if it has one, else select it.
+        On empty ground: send the selected unit there. Rejected orders leave the
+        selection alone, so you can nudge the cursor away and try again.
+        """
+        tile = self.cursor
+        occupant = self.unit_at(tile)
+        if occupant is not None:
+            if occupant.owner == PLAYER_OWNER:
+                self.toggle_order_or_selection(occupant)
+            # An enemy under the cursor changes nothing, matching the mouse.
+            return
+        if self.selected is not None and self.order_move(self.selected, tile):
+            self.select(None)
+
+    def update_cursor_repeat(self, dt_ms: int) -> bool:
+        """Repeat the held WASD key. Returns True if the cursor moved."""
+        held = [k for k in CURSOR_KEYS if R.key_held(pygame.key.get_pressed(), k)]
+        if not held:
+            self.cursor_key = None
+            self.cursor_timer = 0
+            return False
+        if self.cursor_key != held[0]:
+            # A new direction was pressed; start its delay over.
+            self.cursor_key = held[0]
+            self.cursor_timer = 0
+            return False
+
+        self.cursor_timer += dt_ms
+        if self.cursor_timer < CURSOR_INITIAL_DELAY_MS:
+            return False
+        # Rewind to just before the next repeat rather than clearing, so the
+        # steady rate is CURSOR_REPEAT_MS and not the initial delay again.
+        self.cursor_timer = CURSOR_INITIAL_DELAY_MS - CURSOR_REPEAT_MS
+        return self.step_cursor(CURSOR_KEYS[held[0]])
+
     def notify(self, text: str, ticks: int = 180) -> None:
         self.message = text
         self.message_timer = ticks
@@ -111,6 +242,16 @@ class Game:
             self.message_timer -= 1
             if self.message_timer == 0:
                 self.message = ""
+
+    def select(self, unit: Unit | None) -> None:
+        """Select a unit and put the cursor on it.
+
+        Every way of picking a unit goes through here, mouse or keyboard, so the
+        cursor and the selection can never drift onto different units.
+        """
+        self.selected = unit
+        if unit is not None:
+            self.cursor = unit.pos
 
     def select_next(self) -> None:
         """Cycle to the next unit with no queued order."""
@@ -127,22 +268,24 @@ class Game:
             for offset in range(1, len(units) + 1):
                 candidate = units[(idx + offset) % len(units)]
                 if not self.plan.order_for(candidate.unit_id):
-                    self.selected = candidate
-                    self.camera = self.camera_for(candidate)
+                    self.select(candidate)
                     return
         else:
-            self.selected = pending[0]
-            self.camera = self.camera_for(self.selected)
+            self.select(pending[0])
 
     def camera_for(self, unit: Unit) -> tuple[int, int]:
-        """Camera offset that centres the viewport on ``unit``.
+        """Camera offset that centres the viewport on ``unit``."""
+        return self.camera_for_tile(unit.pos)
 
-        The map is larger than the window, so a unit can sit off-screen. This
+    def camera_for_tile(self, tile: tuple[int, int]) -> tuple[int, int]:
+        """Camera offset that centres the viewport on a tile.
+
+        The map is larger than the window, so a tile can sit off-screen. This
         clamps the result to the map bounds, so the view never shows empty space
         outside the grid.
         """
-        target_x = unit.x * CELL + CELL // 2 - self.view_w // 2
-        target_y = unit.y * CELL + CELL // 2 - self.view_h // 2
+        target_x = tile[0] * CELL + CELL // 2 - self.view_w // 2
+        target_y = tile[1] * CELL + CELL // 2 - self.view_h // 2
         return (
             max(0, min(target_x, self.max_cam_x)),
             max(0, min(target_y, self.max_cam_y)),
@@ -150,7 +293,7 @@ class Game:
 
     # ------------------------------------------------------------- input ----
     #
-    # Two ways to order a unit, both supported:
+    # Mouse:
     #
     #   drag     press on the unit, drag to a destination, release
     #   two-click click the unit to select it, then click the destination
@@ -166,6 +309,16 @@ class Game:
     # The selection is cleared once an order is placed, in either mode. Holding
     # it left a stale unit selected, so a later click could act on the wrong one.
     # Clicking the already-selected unit again is the way to deselect by hand.
+    #
+    # Keyboard:
+    #
+    #   WASD   move the cursor one tile
+    #   Space  act on the tile under the cursor, the same two-click flow
+    #   arrows pan the camera
+    #
+    # The two paths are deliberately interchangeable: act_at_cursor is written
+    # against the same unit_at / order_move calls the mouse uses, so the cursor
+    # can never grant an ordering the mouse would have refused.
 
     def handle_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.QUIT:
@@ -175,6 +328,12 @@ class Game:
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 self.running = False
+            elif event.key in CURSOR_KEYS:
+                self.move_cursor(CURSOR_KEYS[event.key])
+            elif event.key == pygame.K_SPACE:
+                # Space was a redundant alias for "resolve"; it now acts at the
+                # cursor. Enter still resolves the turn.
+                self.act_at_cursor()
             elif event.key == pygame.K_TAB:
                 self.select_next()
             elif event.key == pygame.K_r:
@@ -183,7 +342,7 @@ class Game:
                 self.notify("Orders cleared")
             elif event.key == pygame.K_e:
                 self.begin_resolution()
-            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 self.begin_resolution()
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
@@ -237,16 +396,16 @@ class Game:
         if dragged is not None:
             # The gesture started on one of your units, so this is a drag.
             if tile == dragged.pos:
-                # A click on the unit itself. Clicking it again deselects,
-                # which is the only way to clear a selection by hand.
-                self.selected = None if self.selected is dragged else dragged
+                # A click on the unit itself, same rule as Space: cancel an
+                # existing order, otherwise toggle the selection.
+                self.toggle_order_or_selection(dragged)
                 return
             if tile is None:
                 # Released off the map: keep the selection, order nothing.
-                self.selected = dragged
+                self.select(dragged)
                 return
             self.order_move(dragged, tile)
-            self.selected = None
+            self.select(None)
             return
 
         # The press did not land on your unit, so this is the second click of a
@@ -259,7 +418,7 @@ class Game:
         if self.order_move(self.selected, tile):
             # Only drop the selection if the order actually landed. A rejected
             # order keeps it, so the player can aim somewhere reachable instead.
-            self.selected = None
+            self.select(None)
 
     def order_move(self, unit: Unit, tile: tuple[int, int]) -> bool:
         """Queue a move for ``unit``. Does not touch the selection.
@@ -281,7 +440,7 @@ class Game:
         return True
 
     def on_right_click(self, pos: tuple[int, int]) -> None:
-        """Cancel an order on the unit under the cursor, if it has one.
+        """Cancel an order on the unit under the mouse, if it has one.
 
         Deliberately does not change the selection. Right-clicking a unit to
         fix its order must not pull the current selection away, so correcting a
@@ -290,20 +449,16 @@ class Game:
         if self.playback_steps:
             return
         tile = R.tile_at_pixel(pos[0], pos[1], self.camera)
-        target_id = None
+        clicked = None
         if tile is not None and self.game_map.in_bounds(*tile):
             clicked = self.unit_at(tile)
-            if clicked is not None:
-                target_id = clicked.unit_id
-        if target_id is None and self.selected is not None:
-            target_id = self.selected.unit_id
-        if target_id is None:
-            return
 
-        if self.plan.order_for(target_id) is not None:
-            self.plan.clear(target_id)
-            self.notify("Order cancelled")
-        elif self.selected is not None:
+        if clicked is not None:
+            if self.plan.order_for(clicked.unit_id) is not None:
+                self.plan.clear(clicked.unit_id)
+                self.notify("Order cancelled")
+            return
+        if self.selected is not None:
             self.selected = None
 
     # -------------------------------------------------------- resolution ----
@@ -433,6 +588,14 @@ class Game:
             # traces so the two do not overlap.
             if has_order and not (u is self.selected):
                 R.draw_order_arrow(self.screen, self.camera, u.pos, order.move.path)
+
+        # The keyboard cursor goes last so its brackets sit over the sprites.
+        # Red means a unit is selected and this tile is out of its reach.
+        if not self.playback_steps:
+            legal: bool | None = None
+            if planning and self.cursor != self.selected.pos:
+                legal = self.cursor in move_range
+            R.draw_cursor(self.screen, self.camera, self.cursor, legal)
         self.screen.set_clip(previous_clip)
 
         if step is not None and step.blocked:
@@ -468,8 +631,11 @@ class Game:
             for event in pygame.event.get():
                 self.handle_event(event)
 
-            # Manual panning wins while a key is held; otherwise the view
-            # follows the selected unit so it is always visible.
+            # Manual panning wins while a key is held. Otherwise the view tracks
+            # whatever the player is working with: the selected unit, or the
+            # cursor once nothing is selected. Since selecting a unit moves the
+            # cursor onto it, this keeps the pointer on screen either way.
+            self.update_cursor_repeat(dt)
             panned = R.update_camera(
                 pygame.key.get_pressed(),
                 self.camera,
@@ -479,6 +645,8 @@ class Game:
                 self.camera = panned
             elif self.selected is not None:
                 self.camera = self.camera_for(self.selected)
+            else:
+                self.camera = self.camera_for_tile(self.cursor)
             self.tick_message()
             self.advance_playback(dt)
             self.draw()

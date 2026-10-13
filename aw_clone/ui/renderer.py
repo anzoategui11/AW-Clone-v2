@@ -133,6 +133,33 @@ def draw_path_preview(
             )
 
 
+def _corner_brackets(
+    screen: pygame.Surface,
+    rect: pygame.Rect,
+    colour: tuple[int, int, int],
+    arm: int,
+    thickness: int = 3,
+) -> None:
+    """Four L-shaped corners hugging ``rect``.
+
+    Brackets rather than a full outline: they read as a target and do not fight
+    with the unit sprite underneath. Shared by the drag target and the keyboard
+    cursor so every pointer on the board looks like a pointer.
+    """
+    for cx, cy, dx, dy in (
+        (rect.left, rect.top, 1, 1),
+        (rect.right - 1, rect.top, -1, 1),
+        (rect.left, rect.bottom - 1, 1, -1),
+        (rect.right - 1, rect.bottom - 1, -1, -1),
+    ):
+        pygame.draw.line(
+            screen, colour, (cx, cy), (cx + dx * arm, cy), thickness
+        )
+        pygame.draw.line(
+            screen, colour, (cx, cy), (cx, cy + dy * arm), thickness
+        )
+
+
 def draw_drag_target(
     screen: pygame.Surface,
     camera: tuple[int, int],
@@ -153,23 +180,26 @@ def draw_drag_target(
     fill = pygame.Surface((CELL, CELL), pygame.SRCALPHA)
     fill.fill((*colour, 70))
     screen.blit(fill, rect.topleft)
+    _corner_brackets(screen, rect, colour, CELL // 3)
 
-    # Corner brackets rather than a full outline: they read as a target and do
-    # not fight with the unit sprite underneath.
-    arm = CELL // 3
-    thickness = 3
-    for cx, cy, dx, dy in (
-        (rect.left, rect.top, 1, 1),
-        (rect.right - 1, rect.top, -1, 1),
-        (rect.left, rect.bottom - 1, 1, -1),
-        (rect.right - 1, rect.bottom - 1, -1, -1),
-    ):
-        pygame.draw.line(
-            screen, colour, (cx, cy), (cx + dx * arm, cy), thickness
-        )
-        pygame.draw.line(
-            screen, colour, (cx, cy), (cx, cy + dy * arm), thickness
-        )
+
+def draw_cursor(
+    screen: pygame.Surface,
+    camera: tuple[int, int],
+    tile: tuple[int, int],
+    valid: bool | None = None,
+) -> None:
+    """Mark where the keyboard cursor is pointing.
+
+    Same bracket shape as the drag target, so both pointers read as pointers.
+    ``valid`` is ``False`` when a unit is selected and this tile is out of its
+    reach, which turns the brackets red instead of white. ``None`` means there is
+    nothing to judge it against.
+    """
+    cam_x, cam_y = camera
+    rect = cell_rect(tile[0], tile[1], -cam_x, -cam_y)
+    colour = COLORS["cursor"] if valid is not False else COLORS["block"]
+    _corner_brackets(screen, rect, colour, CELL // 5)
 
 
 def draw_order_arrow(
@@ -330,13 +360,16 @@ def draw_side_panel(
         "Drag unit -> tile to order",
         "  or click unit, click tile",
         "",
+        "WASD         move cursor",
+        "Space        act at cursor",
+        "Arrows       pan camera",
+        "",
         "Click        select a unit",
-        "Click again  deselect",
+        "Click again  deselect / cancel",
         "Right click  cancel order",
         "Tab          next unordered unit",
         "Enter        end turn / resolve",
         "R            clear all orders",
-        "Arrows/WASD  pan camera",
     ):
         line(text, small, COLORS["text_dim"])
 
@@ -348,38 +381,44 @@ def draw_side_panel(
         )
 
 
+def key_held(keys, *codes: int) -> bool:
+    """Whether any of ``codes`` is currently held.
+
+    ``keys`` is normally ``pygame.key.get_pressed()``, a ``ScancodeWrapper``.
+    That type supports ``[]`` but has no ``.get()``. It returns False for key
+    codes that are not held, whereas a plain dict raises ``KeyError``, so both
+    are tolerated and the input rules can be exercised without a display.
+    """
+    for code in codes:
+        try:
+            if keys[code]:
+                return True
+        except (KeyError, IndexError):
+            continue
+    return False
+
+
 def update_camera(
     keys,
     camera: tuple[int, int],
     max_cam: tuple[int, int],
     speed: int = 6,
 ) -> tuple[int, int]:
-    """Pan the viewport, clamped to the map bounds.
+    """Pan the viewport with the arrow keys, clamped to the map bounds.
 
-    ``keys`` is normally ``pygame.key.get_pressed()``, a ``ScancodeWrapper``.
-    That type supports ``[]`` but has no ``.get()``. It returns False for key
-    codes that are not held, whereas a plain dict raises ``KeyError``, so both
-    are tolerated and the tests can run without a display.
+    WASD is deliberately absent: it drives the keyboard cursor instead. The two
+    pointers stay separate, arrows are only for looking around.
     """
     cam_x, cam_y = camera
     max_x, max_y = max_cam
 
-    def down(*codes: int) -> bool:
-        for code in codes:
-            try:
-                if keys[code]:
-                    return True
-            except (KeyError, IndexError):
-                continue
-        return False
-
-    if down(pygame.K_LEFT, pygame.K_a):
+    if key_held(keys, pygame.K_LEFT):
         cam_x -= speed
-    if down(pygame.K_RIGHT, pygame.K_d):
+    if key_held(keys, pygame.K_RIGHT):
         cam_x += speed
-    if down(pygame.K_UP, pygame.K_w):
+    if key_held(keys, pygame.K_UP):
         cam_y -= speed
-    if down(pygame.K_DOWN, pygame.K_s):
+    if key_held(keys, pygame.K_DOWN):
         cam_y += speed
     return (max(0, min(cam_x, max_x)), max(0, min(cam_y, max_y)))
 

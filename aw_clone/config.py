@@ -13,6 +13,16 @@ FPS = 60
 MOVE_TICK_MS = 130  # one tile step
 FRAME_MS = 16  # animation frame cap
 
+# Order arrows. The route is drawn as a right-angled staircase with a shine
+# that runs from the unit to its destination and wraps, so a queued order reads
+# as a direction of travel rather than a static line.
+ORDER_ARROW_WIDTH = 4
+ORDER_ARROW_ALPHA = 128  # half transparent
+ORDER_ARROW_STEP = 2  # tiles per straight run in the staircase
+ORDER_SHINE_MS = 1500  # one full pass of the shine
+ORDER_SHINE_SAMPLES = 8  # points sampled along the shining trail
+ORDER_SHINE_LENGTH = 7  # pixels per shine sample
+
 # Keyboard cursor (WASD). The keydown steps once straight away; holding a
 # direction repeats once the delay has passed, then at the repeat rate.
 CURSOR_INITIAL_DELAY_MS = 280

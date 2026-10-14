@@ -572,6 +572,7 @@ class Game:
         self.screen.set_clip(self.viewport)
 
         # Far-to-near ordering, so lower rows overlap the row above.
+        arrows: list[tuple[tuple[int, int], list[tuple[int, int]]]] = []
         for u in sorted([x for x in self.units if x.alive], key=lambda u: (u.y, u.x)):
             order = self.plan.order_for(u.unit_id)
             has_order = bool(not self.playback_steps and order and order.has_any())
@@ -584,10 +585,13 @@ class Game:
                 interpolating=animating.get(u.unit_id),
             )
 
-            # Arrow for queued orders, skipping the unit the preview already
-            # traces so the two do not overlap.
+            # Collect rather than draw: the arrows are half transparent, so they
+            # are composed together and blended once. The selected unit is left
+            # out because the dashed preview already traces its route.
             if has_order and not (u is self.selected):
-                R.draw_order_arrow(self.screen, self.camera, u.pos, order.move.path)
+                arrows.append((u.pos, order.move.path))
+
+        R.draw_order_arrows(self.screen, self.camera, arrows)
 
         # The keyboard cursor goes last so its brackets sit over the sprites.
         # Red means a unit is selected and this tile is out of its reach.

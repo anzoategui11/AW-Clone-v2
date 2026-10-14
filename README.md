@@ -10,6 +10,7 @@ Deliberately narrow so the resolution rules can be settled before combat exists.
 - Grid, terrain, and move-point pathfinding
 - Move orders only, planned hidden then resolved together
 - Simultaneous movement with deterministic conflict handling
+- Keyboard cursor for ordering, mouse still supported
 - Basic AI opponent, pixel-art terrain and unit sprites
 - No combat, no win condition, no pass-device flow yet
 

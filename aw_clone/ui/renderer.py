@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pygame
 
 from ..assets.loader import terrain_surface, unit_surface
@@ -10,6 +12,12 @@ from ..config import (
     COLORS,
     FACTION_NAMES,
     MOVE_TICK_MS,
+    ORDER_ARROW_ALPHA,
+    ORDER_ARROW_STEP,
+    ORDER_ARROW_WIDTH,
+    ORDER_SHINE_LENGTH,
+    ORDER_SHINE_MS,
+    ORDER_SHINE_SAMPLES,
     OVERLAY_ALPHA,
     SIDE_PANEL_W,
 )
@@ -202,23 +210,162 @@ def draw_cursor(
     _corner_brackets(screen, rect, colour, CELL // 5)
 
 
-def draw_order_arrow(
-    screen: pygame.Surface,
+def _staircase(
+    x0: int, y0: int, x1: int, y1: int, run: int = ORDER_ARROW_STEP
+) -> list[tuple[int, int]]:
+    """Orthogonal route from ``(x0,y0)`` to ``(x1,y1)``, only right angles.
+
+    Alternates between the two axes in runs of ``run`` tiles, so a diagonal
+    order reads as a staircase. Matches how units actually move: every step in
+    the game is orthogonal.
+    """
+    points = [(x0, y0)]
+    x, y = x0, y0
+    axis = 0
+    while (x, y) != (x1, y1):
+        dx, dy = x1 - x, y1 - y
+        # Take the axis in turn, but never stall on one with nothing left to do.
+        take = axis if (dx if axis == 0 else dy) else 1 - axis
+        if take == 0:
+            step = min(run, abs(dx))
+            x += step if dx > 0 else -step
+        else:
+            step = min(run, abs(dy))
+            y += step if dy > 0 else -step
+        points.append((x, y))
+        axis ^= 1
+    return points
+
+
+# Scratch surface the arrows are composed on, then blitted once. Reused between
+# frames so the per-frame cost is a fill rather than an allocation.
+_arrow_layer: pygame.Surface | None = None
+
+
+def _arrow_surface(size: tuple[int, int]) -> pygame.Surface:
+    global _arrow_layer
+    if _arrow_layer is None or _arrow_layer.get_size() != size:
+        _arrow_layer = pygame.Surface(size, pygame.SRCALPHA)
+    return _arrow_layer
+
+
+def _polyline_segments(
+    points: list[tuple[int, int]],
+) -> tuple[list[tuple[tuple[int, int], tuple[int, int], float, float]], float]:
+    """Segments with their length and the distance at which each one starts."""
+    segments = []
+    total = 0.0
+    for start, end in zip(points, points[1:]):
+        length = math.hypot(end[0] - start[0], end[1] - start[1])
+        if length == 0:
+            continue
+        segments.append((start, end, length, total))
+        total += length
+    return segments, total
+
+
+def _point_along(
+    segments: list[tuple[tuple[int, int], tuple[int, int], float, float]],
+    distance: float,
+) -> tuple[int, int]:
+    """Pixel position ``distance`` along the polyline, clamped to its ends."""
+    if not segments:
+        return (0, 0)
+    for start, end, length, offset in segments:
+        if distance <= offset + length:
+            t = (distance - offset) / length
+            return (
+                int(start[0] + (end[0] - start[0]) * t),
+                int(start[1] + (end[1] - start[1]) * t),
+            )
+    return segments[-1][1]
+
+
+def _draw_arrow_on_layer(
+    layer: pygame.Surface,
     camera: tuple[int, int],
     unit_pos: tuple[int, int],
     path: list[tuple[int, int]],
+    phase: float,
 ) -> None:
-    """Small arrow from a unit to its ordered destination, for queued orders.
+    """Compose one order arrow onto ``layer``.
 
-    While planning, the dashed preview only shows for the selected unit, so
-    this gives the other units' orders a compact, always-visible marker.
+    Always takes a layer rather than a screen: these arrows are half
+    transparent, and pygame ignores the alpha channel when drawing straight onto
+    an opaque surface. Going through a layer is what makes the blend work.
     """
     if not path:
         return
     cam_x, cam_y = camera
-    start = cell_rect(unit_pos[0], unit_pos[1], -cam_x, -cam_y).center
-    end = cell_rect(path[-1][0], path[-1][1], -cam_x, -cam_y).center
-    pygame.draw.line(screen, COLORS["order_mark"], start, end, 2)
+    destination = path[-1]
+    tiles = _staircase(unit_pos[0], unit_pos[1], destination[0], destination[1])
+    points = [cell_rect(x, y, -cam_x, -cam_y).center for x, y in tiles]
+    if len(points) < 2:
+        return
+
+    width = ORDER_ARROW_WIDTH
+    base = (*COLORS["order_mark"], ORDER_ARROW_ALPHA)
+
+    # Body first, then squares over the corners. Thick lines leave a notch where
+    # two right angles meet, which the squares close.
+    pygame.draw.lines(layer, base, False, points, width)
+    for corner in points[1:-1]:
+        pygame.draw.rect(
+            layer,
+            base,
+            pygame.Rect(
+                corner[0] - width // 2, corner[1] - width // 2, width, width
+            ),
+        )
+
+    segments, total = _polyline_segments(points)
+    if total == 0:
+        return
+
+    # Fade the shine in and out at the ends of its run so the wrap is seamless.
+    edge = 0.15
+    envelope = min(1.0, phase / edge, (1.0 - phase) / edge)
+
+    step = ORDER_SHINE_LENGTH
+    head = phase * total
+    for index in range(ORDER_SHINE_SAMPLES):
+        distance = head - index * step
+        if distance < 0:
+            break
+        fade = (1.0 - index / ORDER_SHINE_SAMPLES) ** 2
+        alpha = int(235 * fade * envelope)
+        if alpha <= 4:
+            continue
+        tail = _point_along(segments, distance)
+        tip = _point_along(segments, min(distance + step, total))
+        pygame.draw.line(layer, (255, 248, 205, alpha), tail, tip, width - 1)
+
+
+def draw_order_arrows(
+    screen: pygame.Surface,
+    camera: tuple[int, int],
+    arrows: list[tuple[tuple[int, int], list[tuple[int, int]]]],
+) -> None:
+    """Draw every queued order in one pass, sharing a single blit.
+
+    Each arrow is a right-angled staircase, half transparent, with a shine that
+    runs from the unit to its destination and wraps. They are composed together
+    on one surface and blended onto the map in a single blit; drawing them one at
+    a time would let each arrow darken the ones underneath.
+
+    While planning, the dashed preview only shows for the selected unit, so this
+    is what makes everyone else's order visible.
+    """
+    if not arrows:
+        return
+    target = screen.get_clip() or screen.get_rect()
+    layer = _arrow_surface(target.size)
+    layer.fill((0, 0, 0, 0))
+    # One shared clock, so every arrow pulses in step rather than flickering.
+    phase = (pygame.time.get_ticks() % ORDER_SHINE_MS) / ORDER_SHINE_MS
+    for unit_pos, path in arrows:
+        _draw_arrow_on_layer(layer, camera, unit_pos, path, phase)
+    screen.blit(layer, target.topleft)
 
 
 def draw_unit(

@@ -71,6 +71,34 @@ needs changing.
 legal order. `TurnPlan` and the AI both call it, so the player and the opponent
 can never disagree about what is allowed.
 
+### You draw the route
+
+Moving the cursor with `WASD` draws the route tile by tile. Nothing is drawn the
+moment a unit is picked up; the line starts once the cursor leaves the unit and
+grows with every step, so the order ends up being the path you walked rather than
+one the planner chose for you. Pressing `Space` then assigns that drawing.
+
+Every step is checked against the movement rules as it is taken, so a drawing is
+never trusted:
+
+| Cursor is… | What is drawn |
+| --- | --- |
+| Inside the unit's range, drawing legal | The drawing |
+| Inside the range, drawing over the move points | A computed route instead |
+| Outside the range | Nothing, until the cursor returns |
+
+Cost only rises along a route, so once a drawing has overrun the move points it
+can never recover by carrying on — that is why circling back over your own route
+hands over to the computed path rather than snapping back to the drawing.
+
+`TurnPlan.path_is_legal()` is the check: every step orthogonal, nothing entered
+that cannot be entered, nothing entered that is blocked except a friendly's tile,
+the whole route inside the move points, and finishing on a square the unit may
+rest on. A drawing that fails any of it is replaced by `find_path()`, so a bad
+drawing can never turn into an order the resolver would refuse.
+
+### What a legal destination is
+
 A unit may be ordered to end on a tile unless:
 
 - **A friendly unit is standing on it and has no orders.** It will still be

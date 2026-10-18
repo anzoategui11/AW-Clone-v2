@@ -29,6 +29,7 @@ from aw_clone.config import (
 CELL = CELL
 MOVE_TICK_MS = MOVE_TICK_MS
 from aw_clone.scenario import new_game
+from aw_clone.grid import is_adjacent
 from aw_clone.turn import TurnPlan, resolve_movement
 from aw_clone.units import Unit
 from aw_clone.ui import renderer as R
@@ -93,6 +94,10 @@ class Game:
         self.cursor: tuple[int, int] = self._starting_cursor()
         self.cursor_timer = 0
         self.cursor_key: int | None = None
+        # Tiles the cursor has walked through since the unit was selected. This
+        # is the route the player drew by hand, as opposed to one the planner
+        # picked; see sync_manual_path and active_path.
+        self.manual_path: list[tuple[int, int]] = []
         self.message = ""
         self.message_timer = 0
         self.turn_number = 1
@@ -168,7 +173,81 @@ class Game:
         if (x, y) == self.cursor:
             return False
         self.cursor = (x, y)
+        self.sync_manual_path()
         return True
+
+    # ------------------------------------------------------- traced route ----
+    #
+    # The player draws the route by walking the cursor, rather than the game
+    # picking one for them. ``manual_path`` is that drawing, in tiles, and it is
+    # checked against the movement rules on every step rather than trusted:
+    #
+    #   cursor inside the unit's range, drawn route legal  ->  show the drawing
+    #   cursor inside the unit's range, drawing over budget ->  show a computed
+    #                                                          route instead
+    #   cursor outside the unit's range                       ->  show nothing,
+    #                                                          and redraw the
+    #                                                          moment it returns
+    #
+    # So a drawn route that runs into a wall, doubles back on itself, or wanders
+    # past the unit's move points quietly stops being the answer, and the
+    # computed route takes over rather than the order being refused.
+
+    def sync_manual_path(self) -> None:
+        """Extend the hand-drawn route to follow the cursor.
+
+        The route starts once the cursor leaves the unit and grows one tile per
+        step, so it is a record of where the player actually walked. Anything
+        that is not one orthogonal step from the last tile starts a fresh
+        drawing, which covers the cursor being moved by a click or by Tab
+        instead of a key.
+
+        Cost only ever rises along a route, so once a drawing has overrun the
+        move points it can never recover by carrying on; it stays over budget
+        until the player selects a different unit.
+        """
+        unit = self.selected
+        if unit is None or self.playback_steps:
+            self.manual_path = []
+            return
+        tile = self.cursor
+        if tile == unit.pos:
+            self.manual_path = []
+            return
+        if self.manual_path and is_adjacent(self.manual_path[-1], tile):
+            self.manual_path.append(tile)
+        else:
+            self.manual_path = [tile]
+
+    def traced_path(self) -> list[tuple[int, int]] | None:
+        """The hand-drawn route, or ``None`` to fall back to a computed one."""
+        if self.selected is None:
+            return None
+        if self.plan.path_is_legal(self.selected, self.manual_path):
+            return list(self.manual_path)
+        return None
+
+    def active_path(
+        self,
+        unit: Unit,
+        move_range: dict[tuple[int, int], int] | None = None,
+    ) -> list[tuple[int, int]]:
+        """The route to show, and to order, for the cursor's current target.
+
+        Empty means nothing is drawn at all: either the cursor is still on the
+        unit, or it has wandered somewhere the unit cannot reach.
+        """
+        tile = self.cursor
+        if tile == unit.pos:
+            return []
+        if move_range is None:
+            move_range = self.plan.move_range(unit)
+        if tile not in move_range:
+            return []
+        traced = self.traced_path()
+        if traced is not None:
+            return traced
+        return self.plan.preview_path(unit, tile)
 
     def toggle_order_or_selection(self, unit: Unit) -> None:
         """Select, or cancel the order of an already-selected unit.
@@ -199,8 +278,9 @@ class Game:
         """Select, order, or cancel at the cursor.
 
         On one of your units: cancel its order if it has one, else select it.
-        On empty ground: send the selected unit there. Rejected orders leave the
-        selection alone, so you can nudge the cursor away and try again.
+        On empty ground: send the selected unit there, along the route the
+        cursor has drawn. Rejected orders leave the selection alone, so you can
+        nudge the cursor away and try again.
         """
         tile = self.cursor
         occupant = self.unit_at(tile)
@@ -209,7 +289,9 @@ class Game:
                 self.toggle_order_or_selection(occupant)
             # An enemy under the cursor changes nothing, matching the mouse.
             return
-        if self.selected is not None and self.order_move(self.selected, tile):
+        if self.selected is not None and self.order_move(
+            self.selected, tile, self.traced_path()
+        ):
             self.select(None)
 
     def update_cursor_repeat(self, dt_ms: int) -> bool:
@@ -420,12 +502,18 @@ class Game:
             # order keeps it, so the player can aim somewhere reachable instead.
             self.select(None)
 
-    def order_move(self, unit: Unit, tile: tuple[int, int]) -> bool:
+    def order_move(
+        self,
+        unit: Unit,
+        tile: tuple[int, int],
+        path: list[tuple[int, int]] | None = None,
+    ) -> bool:
         """Queue a move for ``unit``. Does not touch the selection.
 
-        Returns whether the order was placed.
+        ``path`` is a route the player drew; the mouse paths leave it ``None``
+        and let the planner compute one. Returns whether the order was placed.
         """
-        if not self.plan.set_move(unit, tile):
+        if not self.plan.set_move(unit, tile, path=path):
             if tile != unit.pos:
                 self.notify("Cannot reach that tile")
             return False
@@ -541,14 +629,13 @@ class Game:
             R.draw_move_range(
                 self.screen, self.camera, move_range, self.selected.pos
             )
-            if self.hover is not None and self.hover != self.selected.pos:
-                preview = self.plan.preview_path(self.selected, self.hover)
-                R.draw_path_preview(
-                    self.screen,
-                    self.camera,
-                    preview,
-                    valid=bool(preview),
-                )
+            # The route is drawn by walking the cursor, so it follows the
+            # player's own steps rather than appearing the moment a unit is
+            # picked up. Empty means the cursor has left the unit's reach and
+            # the line is hidden until it comes back.
+            preview = self.active_path(self.selected, move_range)
+            if preview:
+                R.draw_path_preview(self.screen, self.camera, preview)
 
         # While a drag is in progress, mark the tile under the cursor so the
         # legality of the drop is visible before releasing.

@@ -233,18 +233,66 @@ class TurnPlan:
         )
         return path or []
 
+    def path_is_legal(self, unit: Unit, path: list[tuple[int, int]]) -> bool:
+        """Whether ``path`` is a move ``unit`` could actually execute.
+
+        The same rules the resolver applies, checked up front so a hand-drawn
+        route can be rejected before it becomes an order:
+
+        * every step is one orthogonal tile,
+        * no step is on ground this unit cannot enter,
+        * no step is on a tile nothing may enter, except a friendly unit's tile,
+          which is crossable,
+        * the whole route fits inside the unit's move points,
+        * it finishes on a square the unit may come to rest on.
+
+        Friendly tiles cost what the ground costs, so a route through one is
+        charged normally -- crossing a friendly is transparent, not free.
+        """
+        if not path:
+            return False
+        blocked = self.blocked_tiles_for(unit)
+        crossable = self.passable_only_for(unit)
+        budget = unit.unit_type.move_points
+        spent = 0
+        previous = unit.pos
+        for tile in path:
+            if not is_adjacent(previous, tile):
+                return False
+            if not self.game_map.passable(*tile, unit.movement_class):
+                return False
+            if tile in blocked and tile not in crossable:
+                return False
+            spent += self.game_map.enter_cost(unit.movement_class, tile)
+            if spent > budget:
+                return False
+            previous = tile
+        return path[-1] not in blocked
+
     # ------------------------------------------------------------- orders ----
-    def set_move(self, unit: Unit, target: tuple[int, int]) -> bool:
-        """Queue a Move order. Returns False if the target is out of reach."""
+    def set_move(
+        self,
+        unit: Unit,
+        target: tuple[int, int],
+        path: list[tuple[int, int]] | None = None,
+    ) -> bool:
+        """Queue a Move order. Returns False if the target is out of reach.
+
+        ``path`` is a route the player drew by hand. It is used only if it is a
+        legal move ending on ``target``; otherwise the route is computed as
+        usual, so tracing the cursor badly can never produce an order the
+        resolver would refuse.
+        """
         if unit.owner != self.active_owner or not unit.alive:
             return False
         if target == unit.pos:
             self.orders[unit.unit_id] = Order(unit_id=unit.unit_id)
             return True
 
-        # preview_path already refuses a target sitting on a friendly unit, so
-        # the queued order can never disagree with the path the player was shown.
-        path = self.preview_path(unit, target)
+        if path is None or not self.path_is_legal(unit, path) or path[-1] != target:
+            # preview_path already refuses a target sitting on a friendly unit,
+            # so the queued order can never disagree with a computed route.
+            path = self.preview_path(unit, target)
         if not path:
             return False
 

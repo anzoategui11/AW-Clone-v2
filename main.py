@@ -29,7 +29,7 @@ from aw_clone.config import (
 CELL = CELL
 MOVE_TICK_MS = MOVE_TICK_MS
 from aw_clone.scenario import new_game
-from aw_clone.grid import is_adjacent
+from aw_clone.grid import NO_BUDGET, is_adjacent, search
 from aw_clone.turn import TurnPlan, resolve_movement
 from aw_clone.units import Unit
 from aw_clone.ui import renderer as R
@@ -249,6 +249,25 @@ class Game:
             return traced
         return self.plan.preview_path(unit, tile)
 
+    def is_order_target(self, unit: Unit) -> bool:
+        """Whether landing on ``unit`` means "send the selection here".
+
+        A friendly is a destination only while it is *leaving*: once it has an
+        order, its tile will be free, so the selection may be sent onto it.
+        Any other friendly is an ordinary selection, so clicking a parked unit
+        while another is selected still switches to it instead of turning into
+        a refused order.
+
+        The selected unit itself is the exception: clicking it cancels the
+        order or drops the selection.
+        """
+        if self.selected is None or self.playback_steps:
+            return False
+        if unit is self.selected:
+            return False
+        order = self.plan.order_for(unit.unit_id)
+        return order is not None and order.has_any()
+
     def toggle_order_or_selection(self, unit: Unit) -> None:
         """Select, or cancel the order of an already-selected unit.
 
@@ -277,7 +296,10 @@ class Game:
     def act_at_cursor(self) -> None:
         """Select, order, or cancel at the cursor.
 
-        On one of your units: cancel its order if it has one, else select it.
+        On one of your units: cancel its order if it has one, else select it --
+        unless a unit is already selected, in which case the cursor is choosing
+        a destination and the friendly under it is an order target instead.
+
         On empty ground: send the selected unit there, along the route the
         cursor has drawn. Rejected orders leave the selection alone, so you can
         nudge the cursor away and try again.
@@ -285,10 +307,15 @@ class Game:
         tile = self.cursor
         occupant = self.unit_at(tile)
         if occupant is not None:
-            if occupant.owner == PLAYER_OWNER:
+            if occupant.owner != PLAYER_OWNER:
+                # An enemy under the cursor changes nothing, matching the mouse.
+                return
+            if not self.is_order_target(occupant):
                 self.toggle_order_or_selection(occupant)
-            # An enemy under the cursor changes nothing, matching the mouse.
-            return
+                return
+            # A friendly standing on a tile the selection may be free to take
+            # (it has been ordered away, so the square will be empty). Fall
+            # through and try to order the selected unit onto it.
         if self.selected is not None and self.order_move(
             self.selected, tile, self.traced_path()
         ):
@@ -329,9 +356,12 @@ class Game:
         """Select a unit and put the cursor on it.
 
         Every way of picking a unit goes through here, mouse or keyboard, so the
-        cursor and the selection can never drift onto different units.
+        cursor and the selection can never drift onto different units. The
+        hand-drawn route is dropped too: a route drawn for the previous unit
+        must not be inherited by the next one.
         """
         self.selected = unit
+        self.manual_path = []
         if unit is not None:
             self.cursor = unit.pos
 
@@ -387,6 +417,13 @@ class Game:
     #   press on your unit, release on itself -> select it
     #   press elsewhere, selected unit exists -> order it to that tile
     #   press elsewhere, nothing selected -> nothing happens
+    #
+    # Once a unit is selected the move range is on screen, so a friendly that is
+    # *leaving* -- it already has an order, so its square will be free -- is an
+    # order target rather than a unit to select. That is what lets a unit be
+    # sent onto a square another friendly has been ordered off. Any other
+    # friendly is still a normal selection, so switching units keeps working.
+    # The selected unit itself cancels or deselects when clicked, as before.
     #
     # The selection is cleared once an order is placed, in either mode. Holding
     # it left a stale unit selected, so a later click could act on the wrong one.
@@ -458,6 +495,11 @@ class Game:
         tile = self.tile_at(pos)
         clicked = self.unit_at(tile) if tile is not None else None
         if clicked is not None and clicked.owner == PLAYER_OWNER:
+            if self.is_order_target(clicked):
+                # A unit is already selected, so this press aims at the
+                # friendly's tile rather than picking the friendly. Arm no
+                # drag; on_release places the order if the square is free.
+                return
             # Selection itself is decided on release, so a click can toggle.
             self.drag_from = clicked
             return
@@ -494,8 +536,11 @@ class Game:
         # two-click order, aimed at the currently selected unit.
         if self.selected is None or tile is None:
             return
-        if self.unit_at(tile) is not None:
-            # Clicking another unit selects it, which on_press already handled.
+        # A friendly that is leaving leaves a square the selection can take, so
+        # it is a valid target. A parked one is selected by pressing it, not by
+        # releasing here after a press somewhere else.
+        occupant = self.unit_at(tile)
+        if occupant is not None and not self.is_order_target(occupant):
             return
         if self.order_move(self.selected, tile):
             # Only drop the selection if the order actually landed. A rejected
@@ -515,7 +560,7 @@ class Game:
         """
         if not self.plan.set_move(unit, tile, path=path):
             if tile != unit.pos:
-                self.notify("Cannot reach that tile")
+                self.notify(self.order_refusal(unit, tile))
             return False
 
         outstanding = [
@@ -526,6 +571,33 @@ class Game:
         else:
             self.notify("All units ordered - press Enter to resolve", 240)
         return True
+
+    def order_refusal(self, unit: Unit, tile: tuple[int, int]) -> str:
+        """Explain a refused order in the status line.
+
+        Distance is the usual reason and the least obvious one, because a
+        tracked unit spends two points per plain tile: three tiles away costs
+        six of its five points. Reporting the points the route needs against
+        the points the unit has makes that visible instead of leaving the
+        player guessing.
+        """
+        spent, _ = search(
+            self.game_map,
+            unit.pos,
+            NO_BUDGET,
+            unit.movement_class,
+            blocked=self.plan.blocked_tiles_for(unit),
+            passable_only=self.plan.passable_only_for(unit),
+        )
+        needed = spent.get(tile)
+        if needed is None:
+            return "No route to that tile"
+        if needed > unit.unit_type.move_points:
+            return (
+                f"Route needs {needed} move points; "
+                f"{unit.unit_type.name} has {unit.unit_type.move_points}"
+            )
+        return "Cannot reach that tile"
 
     def on_right_click(self, pos: tuple[int, int]) -> None:
         """Cancel an order on the unit under the mouse, if it has one.
@@ -547,7 +619,7 @@ class Game:
                 self.notify("Order cancelled")
             return
         if self.selected is not None:
-            self.selected = None
+            self.select(None)
 
     # -------------------------------------------------------- resolution ----
     def begin_resolution(self) -> None:

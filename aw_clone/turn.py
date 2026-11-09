@@ -67,27 +67,39 @@ def claimed_destinations(orders: dict[int, Order]) -> set[tuple[int, int]]:
     return claimed
 
 
-def friendly_blockers(
+def crossable_blocked_tiles(
     units: list[Unit],
     orders: dict[int, Order],
     unit: Unit,
 ) -> set[tuple[int, int]]:
-    """Friendly tiles that may be crossed but never stopped on.
+    """Tiles ``unit`` may cross but never stop on.
 
-    A friendly unit standing in the way cannot be displaced, but it also must not
-    act as a wall. Treating these as hard blockers made a unit in front cut off
-    everything behind it, which made a friendly formation silently block a
-    whole column.
+    These are the squares :func:`planning_blocked_tiles` refuses as destinations
+    for reasons that will not be standing in the way when the unit walks over
+    them:
 
-    Crossing one is not a shortcut, though: the tile costs what it costs like
-    any other. A friendly is transparent, not free. This is what the search
-    reads as ``passable_only``.
+    * **A friendly unit's square.** It cannot be displaced, but it must not act
+      as a wall either -- treating it as a hard blocker made a formation
+      silently seal the whole column behind it.
+    * **A square a friendly unit has been ordered to take.** It is reserved, so
+      nobody else may end there, but the unit heading for it has not arrived
+      yet. Nothing is actually in the way, so crossing it costs what the ground
+      costs and no more.
 
-    Only tiles held by friendly units that have *no* order appear here. A
+    The search reads this as ``passable_only``: these tiles take priority over
+    ``blocked``, so they never wall anything off while still staying out of the
+    reachable set. Crossing one is not a shortcut -- the tile is charged
+    normally, so a reserved square is transparent, not free.
+
+    Only tiles held by friendly units that have *no* order appear as held. A
     friendly unit that has been ordered away is expected to be empty by
-    resolution time, so its tile is a normal legal destination.
+    resolution time, so its tile is a normal legal destination instead.
+
+    A unit's own claim is not included: it is not in anybody's way and the unit
+    that owns it may come to rest there. Its own tile is not included either, so
+    the unit always stays in its own move range.
     """
-    blockers: set[tuple[int, int]] = set()
+    crossable: set[tuple[int, int]] = set()
     for other in units:
         if not other.alive or other.unit_id == unit.unit_id:
             continue
@@ -96,8 +108,19 @@ def friendly_blockers(
         order = orders.get(other.unit_id)
         if order is not None and order.has_any():
             continue  # ordered away, so expected to be free
-        blockers.add(other.pos)
-    return blockers
+        crossable.add(other.pos)
+
+    own_order = orders.get(unit.unit_id)
+    own_destination: tuple[int, int] | None = None
+    if own_order is not None and own_order.has_any() and own_order.move is not None:
+        own_destination = own_order.move.destination
+
+    for destination in claimed_destinations(orders):
+        if destination != own_destination:
+            crossable.add(destination)
+
+    crossable.discard(unit.pos)
+    return crossable
 
 
 def planning_blocked_tiles(
@@ -125,8 +148,9 @@ def planning_blocked_tiles(
     Only a friendly unit's *endpoint* is reserved. The tiles it walks over are
     left fair, so a follower can trail along the same corridor.
 
-    Note this is about *destinations*. Pathing treats a friendly blocker as
-    transparent via :func:`friendly_blockers`, so a unit can route past one.
+    Note this is about *destinations*. Pathing treats a friendly unit's tile and
+    a claimed destination as transparent via :func:`crossable_blocked_tiles`, so
+    a unit can route past or through them without either becoming a wall.
     """
     occupied = {
         u.pos: u for u in units if u.alive and u.unit_id != unit.unit_id
@@ -196,20 +220,22 @@ class TurnPlan:
         return planning_blocked_tiles(self.units, self.orders, unit)
 
     def passable_only_for(self, unit: Unit) -> set[tuple[int, int]]:
-        """Friendly tiles that can be crossed but not stopped on.
+        """Tiles that are blocked as destinations but transparent to pathing.
 
-        Kept alongside :meth:`blocked_tiles_for` rather than folded into it:
-        these tiles appear in both, and the search gives them priority. So they
-        are never offered as a destination while still not walling anything off.
+        Covers a friendly unit standing in the way and a square another friendly
+        unit has been ordered to take. Both are in :meth:`blocked_tiles_for`
+        too, and the search gives these priority, so they are never offered as a
+        destination while still not walling anything off -- and crossing them
+        costs the tile's normal move points.
         """
-        return friendly_blockers(self.units, self.orders, unit)
+        return crossable_blocked_tiles(self.units, self.orders, unit)
 
     def move_range(self, unit: Unit) -> dict[tuple[int, int], int]:
         """Tiles the unit can reach this turn, mapped to points remaining.
 
-        Friendly blockers are passed as ``passable_only`` so the search routes
-        through them at the tile's normal cost, while they stay out of the
-        returned range because a unit may not come to rest on a friendly unit.
+        Crossable blocked tiles are passed as ``passable_only`` so the search
+        routes through them at the tile's normal cost, while they stay out of
+        the returned range because a unit may not come to rest on them.
         """
         return reachable(
             self.game_map,

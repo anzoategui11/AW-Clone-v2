@@ -12,7 +12,7 @@ import math
 
 from .grid import GameMap, Terrain, find_path, reachable
 from .orders import MoveOrder, Order
-from .turn import friendly_blockers, planning_blocked_tiles
+from .turn import crossable_blocked_tiles, planning_blocked_tiles
 from .units import Unit
 
 # Reward a unit for finishing on cheap, defensible ground.
@@ -49,10 +49,11 @@ def plan_turn(
 
     for unit in sorted(mine, key=lambda u: u.unit_id):
         # Two sets: squares nothing may end on (enemies, claimed destinations)
-        # and friendly tiles that may be crossed but not stopped on. The search
-        # resolves the overlap itself, so `blocked` is passed as-is.
+        # and squares that are reserved but transparent to pathing (a friendly
+        # standing in the way, a destination another unit has claimed). The
+        # search resolves the overlap itself, so `blocked` is passed as-is.
         blocked = planning_blocked_tiles(units, orders, unit)
-        soft = friendly_blockers(units, orders, unit)
+        soft = crossable_blocked_tiles(units, orders, unit)
 
         target = _choose_destination(game_map, unit, enemies, blocked, soft)
         if target is None or target == unit.pos:

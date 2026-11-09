@@ -58,12 +58,19 @@ needs changing.
 | Drag a unit to a tile | Queue a move |
 | Click a unit, then click a tile | Queue a move (same thing, two clicks) |
 | Click a selected unit again | Deselect it, or cancel its order if it has one |
-| Click a unit that has an order | Select it, leaving the order in place |
+| Click a friendly while a unit is selected | Send the selected unit there if that friendly is leaving; otherwise select the friendly (see below) |
+| Click a unit that has an order | Select it when nothing is selected, leaving the order in place |
 | Click an enemy | Nothing; orders cannot target enemies yet |
 | Right click | Cancel the order on the unit under the mouse |
 | Tab | Next unit without an order |
 | Enter | End turn and resolve |
 | R | Clear all orders |
+
+A friendly unit that has been ordered away leaves its square free, and clicking
+that square while another unit is selected sends the selected unit there instead
+of selecting the departing unit. A friendly that is staying put is still a normal
+selection, so clicking one switches to it as usual. The selected unit itself
+cancels or deselects when clicked.
 
 ## Ordering rules
 
@@ -108,14 +115,18 @@ A unit may be ordered to end on a tile unless:
   at resolution time, so the order is refused at planning time instead.
 - **An enemy unit is standing on it.** Always blocked.
 
-A friendly unit's tile is **transparent**: the unit may walk *through* it but
-may not come to rest on it. Treating those tiles as hard blockers made a single
-friendly unit in front cut off everything behind it. `friendly_blockers()` marks
-them and `search()` reads them as `passable_only` — routed through at the tile's
-normal cost, excluded from the returned range, and rejected as a destination.
+A friendly unit's tile and a square a friendly unit has been ordered to take are
+both **transparent**: the unit may walk *through* them but may not come to rest
+on them. Treating them as hard blockers made a single friendly unit in front cut
+off everything behind it, and make a unit route around a destination that is not
+even occupied yet. `crossable_blocked_tiles()` marks them and `search()` reads
+them as `passable_only` — routed through at the tile's normal cost, excluded
+from the returned range, and rejected as a destination.
 
-Crossing a friendly is not free. It is charged the terrain cost like any other
-tile; the unit standing there makes it impassable, not cheap.
+Crossing one is not free. It is charged the terrain cost like any other tile;
+the square being held or reserved makes it off-limits as a stop, not cheap to
+enter. A destination another unit claimed is only **reserved**, not filled: the
+unit heading for it has not arrived, so there is nothing physically in the way.
 
 Enemy tiles stay hard blockers, so an enemy does wall off a corridor.
 
